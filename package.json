@@ -1,0 +1,28 @@
+{
+  "name": "apm-ffmpeg",
+  "version": "1.0.0",
+  "description": "Lambda function using ffmpeg",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "build": "",
+    "deploy": "npm run build && serverless deploy --verbose -s dev",
+    "deployqa": "npm run build && serverless deploy --verbose -s qa",
+    "deployprod": "npm run build && serverless deploy --verbose -s prod",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "prettier": {
+    "trailingComma": "es5"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "author": "Sara Hentzel",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.626.0"
+  }
+}
