@@ -9,13 +9,12 @@ import path, { basename } from 'path';
 
 const s3Client = new S3Client({ region: 'us-east-1' });
 
-
 export async function handler(event) {
     const bucket = event.Records[0].s3.bucket.name;
     let key = decodeURIComponent(
       event.Records[0].s3.object.key.replace(/\+/g, " ")
     );
-    console.log("hello! processing new s3 file!", key);
+    console.log("hello!! processing new s3 file!", key);
     try {
     //key looks like 139647_Tes/126282_Luk/NIV11-LUK-001-001004v01.mp3
     const ext = path.extname(key);
@@ -27,28 +26,44 @@ export async function handler(event) {
 
         const data = await obj.Body.transformToString();
         var json = JSON.parse(data);
+
         const id = json.id;
         const inputKey = json.inputKey;
         const ext = path.extname(inputKey);
         const inputFile = `${id}_input${ext}`;
-        const inputPath = `${process.env.efspath}/${inputFile}`;
+        const inputPath = `${process.env.EFS_PATH}/${inputFile}`;
         await downloadFileFromS3(json.inputBucket, inputKey, inputPath);
       
         console.log(`${inputPath} downloaded`,  existsSync(inputPath));
 
         const outputFile = `${id}_${basename(json.outputKey)}`; 
 
-        let outputFilePath = `${process.env.efspath}/${outputFile}`;
+        let outputFilePath = `${process.env.EFS_PATH}/${outputFile}`;
         if  (existsSync(outputFilePath)) {
           unlinkSync(outputFilePath);
         }
         //let command = `/opt/bin/ffmpeg -i "${json.s3signedurl}"  -acodec libmp3lame -q:a 2 -metadata title="my title" -f mpegts ${outputFilePath}`;        //pipe:`;  
         
-      
-        let command = `/opt/bin/ffmpeg -i ${inputPath} -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
+        let metadata = '';
+        if (json.tags)
+        {
+            let tags = json.tags;
+            if (tags.cover) {
+                //convert the webp to a 200x200 jpg
+                let coverfile = `${process.env.EFS_PATH}/${id}_cover.jpg`; 
+                let command = `/opt/bin/ffmpeg -i ${tags.cover} -vf scale=200:-1  -update true -vframes 1 ${coverfile}`; 
+                await execPromise(command);
+                if (existsSync(coverfile))
+                    metadata = `${metadata} -i ${coverfile} -map 0:a -map 1:0 -c:1 copy -id3v2_version 3`;
+            }
+            if (tags.title) metadata = `${metadata} -metadata title="${tags.title}"`;
+            if (tags.artist) metadata = `${metadata} -metadata artist="${tags.artist}"`;
+            if (tags.album)  metadata = `${metadata} -metadata album="${tags.album}"`;
+        }
+        let command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
         await execPromise(command);
 
-
+   
         // Step 3: Upload the processed file back to S3
         await uploadFileToS3(json.outputBucket, json.outputKey,
           outputFilePath);
@@ -91,7 +106,6 @@ export async function handler(event) {
                     console.log('exec error', error, 'stderr', stderr, 'stdout', stdout);
                     resolve(`${stdout} stderr: ${stderr}`);
                 } else {
-                    //console.log('exec stdout', stdout);
                     resolve(stdout);
                 }
             });
@@ -104,11 +118,12 @@ export async function handler(event) {
             new GetObjectCommand({ Bucket: bucket, Key: key }),
         );
         var ba = await obj.Body.transformToByteArray();
-        console.log('downloaded file', ba.length);
+        try {
         writeFileSync(
             downloadPath,
             ba
         );
+    } catch(e) {console.log('writeFileSync error', e);}
 
     }
 
@@ -130,6 +145,4 @@ export async function handler(event) {
                 console.log('error uploading file', error);
             }
     }
-                
-
 }
