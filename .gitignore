@@ -1,3 +1,8 @@
-.serverless/
-bin/
-node_modules/
+# package directories
+node_modules
+
+# Serverless directories
+.serverless
+
+serverless.env.yml
+ffmpeg

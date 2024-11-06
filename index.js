@@ -45,23 +45,30 @@ export async function handler(event) {
         //let command = `/opt/bin/ffmpeg -i "${json.s3signedurl}"  -acodec libmp3lame -q:a 2 -metadata title="my title" -f mpegts ${outputFilePath}`;        //pipe:`;  
         
         let metadata = '';
+        let coverfile = '';
         if (json.tags)
         {
             let tags = json.tags;
             if (tags.cover) {
+                try {
                 //convert the webp to a 200x200 jpg
-                let coverfile = `${process.env.EFS_PATH}/${id}_cover.jpg`; 
-                let command = `/opt/bin/ffmpeg -i ${tags.cover} -vf scale=200:-1  -update true -vframes 1 ${coverfile}`; 
-                await execPromise(command);
+                coverfile = `${process.env.EFS_PATH}/${id}_cover.jpg`; 
+                let command = `/opt/bin/ffmpeg -i ${tags.cover} -loglevel error -vf scale=200:-1  -update true -vframes 1 ${coverfile}`; 
+                await execPromise(command, 5);
                 if (existsSync(coverfile))
                     metadata = `${metadata} -i ${coverfile} -map 0:a -map 1:0 -c:1 copy -id3v2_version 3`;
+                } catch (err)
+                {
+                    console.log('cover error', err);
+                    coverfile = '';
+                }
             }
             if (tags.title) metadata = `${metadata} -metadata title="${tags.title}"`;
             if (tags.artist) metadata = `${metadata} -metadata artist="${tags.artist}"`;
             if (tags.album)  metadata = `${metadata} -metadata album="${tags.album}"`;
         }
-        let command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
-        await execPromise(command);
+        let command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} -loglevel error -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
+        await execPromise(command, 30);
 
    
         // Step 3: Upload the processed file back to S3
@@ -70,6 +77,7 @@ export async function handler(event) {
         
           unlinkSync(inputPath);
           unlinkSync(outputFilePath);
+          if (coverfile) unlinkSync(coverfile);
         
         return {
             statusCode: 200,
@@ -98,17 +106,33 @@ export async function handler(event) {
         } 
     }
  */
-    function execPromise(command) {
-        console.log('execPromise', command);
+    function execPromise(command, timeoutsecs) {
+        console.log('execPromise', command, timeoutsecs);
         return new Promise((resolve, reject) => {
-            let chproc = exec(command, (error, stdout, stderr) => {
-                if (error) {
-                    console.log('exec error', error, 'stderr', stderr, 'stdout', stdout);
-                    resolve(`${stdout} stderr: ${stderr}`);
-                } else {
-                    resolve(stdout);
-                }
-            });
+            try {
+                //this timeout doesn't work
+                let child = exec(command, { timeout: timeoutsecs*1000 }, (error, stdout, stderr) => {
+                    clearTimeout(timeout);
+                    if (error) {
+                        console.log('exec error', error, 'stderr', stderr, 'stdout', stdout);
+                        resolve(`${stdout} stderr: ${stderr}`);
+                    } else {
+                        resolve(stdout);
+                    }
+                });
+                var timeout = setTimeout(() => {
+                    console.log('Timeout');
+                    try {
+                      //this doesn't work either...will it ever get done?  Is it running forever?
+                      process.kill(-child.pid, 'SIGKILL');
+                    } catch (e) {
+                      console.log('Cannot kill process');
+                    }
+                    resolve();
+                  }, timeoutsecs*1000);
+            } catch (err) {
+                reject(`err: ${err}`)
+            }
         });
     }
 
