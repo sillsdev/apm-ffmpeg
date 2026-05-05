@@ -4,10 +4,12 @@ import {
     GetObjectCommand,
   } from "@aws-sdk/client-s3"
 import { exec } from 'child_process';
-import { readFileSync, writeFileSync, unlinkSync,existsSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, statSync } from 'fs';
 import path, { basename } from 'path';
+import https from 'https';
 
 const s3Client = new S3Client({ region: 'us-east-1' });
+
 
 export async function handler(event) {
     const bucket = event.Records[0].s3.bucket.name;
@@ -16,7 +18,7 @@ export async function handler(event) {
     );
     console.log("hello!! processing new s3 file!", key);
     try {
-    //key looks like 139647_Tes/126282_Luk/NIV11-LUK-001-001004v01.mp3
+    //key looks like 139647.key
     const ext = path.extname(key);
       
     if (ext === ".key") {
@@ -36,48 +38,92 @@ export async function handler(event) {
       
         console.log(`${inputPath} downloaded`,  existsSync(inputPath));
 
-        const outputFile = `${id}_${basename(json.outputKey)}`; 
-
+        const outputKey = json.outputKey;
+        const outputFile = `${id}_${basename(outputKey)}`; 
         let outputFilePath = `${process.env.EFS_PATH}/${outputFile}`;
         if  (existsSync(outputFilePath)) {
           unlinkSync(outputFilePath);
         }
-        //let command = `/opt/bin/ffmpeg -i "${json.s3signedurl}"  -acodec libmp3lame -q:a 2 -metadata title="my title" -f mpegts ${outputFilePath}`;        //pipe:`;  
+        let mp3 = path.extname(outputFilePath) ==='.mp3';
+       
         
         let metadata = '';
+        let metawithNoCover = '';
         let coverfile = '';
+        let command = '';
         if (json.tags)
         {
             let tags = json.tags;
             if (tags.cover) {
                 try {
+                const coverKey = `${id}_cover.webp`;
+                const coverPath = `${process.env.EFS_PATH}/${coverKey}`;
+                coverfile = tags.cover;
+                try {
+                    const coverUrl = new URL(coverfile);
+                    const isHttp = coverUrl.protocol === 'https:' || coverUrl.protocol === 'http:';
+                    const isBucketHost =
+                        coverUrl.hostname === json.inputBucket ||
+                        coverUrl.hostname.startsWith(`${json.inputBucket}.s3.`);
+                    if (isHttp && isBucketHost) {
+                        coverfile = coverUrl.pathname.replace(/^\/+/, '');
+                    }
+                } catch (_err) {
+                    // Not a URL; keep the original cover key/path.
+                }
+                await downloadFileFromS3(json.inputBucket, coverfile, coverPath);
+                console.log(`${coverPath} downloaded`,  existsSync(coverPath));
                 //convert the webp to a 200x200 jpg
                 coverfile = `${process.env.EFS_PATH}/${id}_cover.jpg`; 
-                let command = `/opt/bin/ffmpeg -i ${tags.cover} -loglevel error -vf scale=200:-1  -update true -vframes 1 ${coverfile}`; 
+                command = `/opt/bin/ffmpeg -i ${coverPath} -loglevel error -vf scale=200:-1  -update true -vframes 1 ${coverfile}`; 
                 await execPromise(command, 5);
                 if (existsSync(coverfile))
-                    metadata = `${metadata} -i ${coverfile} -map 0:a -map 1:0 -c:1 copy -id3v2_version 3`;
+                    if (mp3) {
+                        metadata = ` -i ${coverfile} -map 0:a -map 1:0 -c:1 copy -id3v2_version 3`;
+                    } else {
+                        metadata = ` -i ${coverfile} -map 0:a -map 1 -disposition:v attached_pic -c:v mjpeg`;
+                    }
                 } catch (err)
                 {
                     console.log('cover error', err);
                     coverfile = '';
+                    metawithNoCover = " -map 0:a"
                 }
             }
-            if (tags.title) metadata = `${metadata} -metadata title="${tags.title}"`;
-            if (tags.artist) metadata = `${metadata} -metadata artist="${tags.artist}"`;
-            if (tags.album)  metadata = `${metadata} -metadata album="${tags.album}"`;
+            if (tags.title)  metawithNoCover = `${metawithNoCover} -metadata title="${tags.title}"`;
+            if (tags.artist) metawithNoCover = `${metawithNoCover} -metadata artist="${tags.artist}"`;
+            if (tags.album)  metawithNoCover = `${metawithNoCover} -metadata album="${tags.album}"`;
         }
-        let command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} -loglevel error -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
-        await execPromise(command, 30);
 
-   
-        // Step 3: Upload the processed file back to S3
-        await uploadFileToS3(json.outputBucket, json.outputKey,
-          outputFilePath);
+        if (mp3) {
+            command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} ${metawithNoCover} -loglevel error -acodec libmp3lame -q:a 2 -f mp3 ${outputFilePath}`; 
+        } else {
+            /* aac just didn't work 
+            let aacOutputFilePath = outputFilePath.replace(/\.[^/.]+$/, '.aac');
+            let aacOutputKey = outputKey.replace(/\.[^/.]+$/, '.aac');
+            command = `/opt/bin/ffmpeg -i ${inputPath} -c:a aac -b:a 48k ${aacOutputFilePath}`; 
+            await execPromise(command, 30);
+            await uploadFileToS3(json.outputBucket, aacOutputKey, aacOutputFilePath);
+            */
+            let NoCoverOutputFilePath = `${process.env.EFS_PATH}/${id}_NC${basename(outputKey)}`;
+            if  (existsSync(NoCoverOutputFilePath)) {
+                unlinkSync(NoCoverOutputFilePath);
+            }
+            let NoCoverOutputKey = addSuffixToFilePath(outputKey, "NC");
+            command = `/opt/bin/ffmpeg -i ${inputPath}  ${metawithNoCover} -c:a aac -b:a 48k ${NoCoverOutputFilePath}`; 
+            await execPromise(command, 30);
+            await uploadFileToS3(json.outputBucket, NoCoverOutputKey, NoCoverOutputFilePath);
+            unlinkSync(NoCoverOutputFilePath);
+            command = `/opt/bin/ffmpeg -i ${inputPath} ${metadata} ${metawithNoCover} -loglevel error -c:a aac -b:a 48k ${outputFilePath}`; 
+        }
+        await execPromise(command, 60);
         
-          unlinkSync(inputPath);
-          unlinkSync(outputFilePath);
-          if (coverfile) unlinkSync(coverfile);
+        // Step 3: Upload the processed file back to S3
+        await uploadFileToS3(json.outputBucket, json.outputKey, outputFilePath);
+        
+        unlinkSync(inputPath);
+        unlinkSync(outputFilePath);
+        if (coverfile) unlinkSync(coverfile);
         
         return {
             statusCode: 200,
@@ -106,6 +152,17 @@ export async function handler(event) {
         } 
     }
  */
+    function addSuffixToFilePath(originalPath, suffix) {
+        const directory = path.dirname(originalPath);
+        const extension = path.extname(originalPath);
+        const fileNameWithoutExtension = path.basename(originalPath, extension);
+        
+        // Construct the new filename with the suffix
+        const newFileName = `${fileNameWithoutExtension}${suffix}${extension}`;
+        
+        // Combine the parts back into a full path
+        return path.join(directory, newFileName);
+      }
     function execPromise(command, timeoutsecs) {
         console.log('execPromise', command, timeoutsecs);
         return new Promise((resolve, reject) => {
@@ -155,7 +212,7 @@ export async function handler(event) {
       try {
         console.log('uploading file', bucket, key, uploadPath);
         const fileContent = readFileSync(uploadPath);
-
+console.log('fileContent length', fileContent.length);
             const params = {
                 Bucket: bucket,
                 Key: key,
@@ -169,4 +226,5 @@ export async function handler(event) {
                 console.log('error uploading file', error);
             }
     }
+
 }
